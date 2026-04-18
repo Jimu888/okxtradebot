@@ -1,0 +1,20 @@
+{
+  "btc_activated": false,
+  "btc_position": {
+    "active": false,
+    "entry_count": 0,
+    "avg_entry_price": 0.0,
+    "total_sz": 0,
+    "remaining_pct": 100
+  },
+  "rave_position": {
+    "active": true,
+    "avg_entry_price": 23.7848,
+    "total_sz": 1,
+    "remaining_pct": 100,
+    "signal_count": 1,
+    "swing_high": 28.5,
+    "needs_retag": true
+  },
+  "grid_bots": []
+}

@@ -1,16 +1,19 @@
 ---
 name: okx-compound-strategy
 description: >
-  Compound trading strategy combining BTC trend trading and high-volatility grid bots.
+  Compound trading strategy combining BTC trend trading, RAVE dedicated short,
+  and high-volatility grid bots.
   BTC-USDT-SWAP: 50x isolated leverage, enter long on 5m RSI(14)<30 AND CCI(20)<-100,
-  scale in on second signal, exit on RSI>70 or CCI>100. High-volatility track: scan
-  contract top-5 gainers for RSI/MACD divergence on 5m charts, deploy long/short
-  contract grid bots with OI confirmation for position sizing. Uses okx-cex-market,
-  okx-cex-trade, okx-cex-bot, okx-cex-portfolio skills.
+  activated only after 1H MACD DIF crosses zero axis.
+  RAVE-USDT-SWAP: dedicated short up to 200 USDT (uses BTC budget if BTC inactive),
+  10x isolated, multi-timeframe bearish signals (4H/1H/30m/5m).
+  High-volatility track: scan contract top-5 gainers for RSI/MACD divergence on 5m charts,
+  deploy long/short contract grid bots with OI confirmation for position sizing.
+  All orders tagged agentTradeKit for leaderboard counting.
 license: MIT
 metadata:
   author: compound-strategy
-  version: "1.0.0"
+  version: "2.0.0"
   category: compound-strategy
   dependencies: okx-cex-market, okx-cex-trade, okx-cex-bot, okx-cex-portfolio
 ---
@@ -28,6 +31,8 @@ Install dependencies first:
 npx skills add okx/agent-skills
 ```
 
+**CRITICAL**: All order placement commands MUST include `--tag agentTradeKit` for leaderboard counting.
+
 ---
 
 ## Capital Allocation
@@ -35,6 +40,7 @@ npx skills add okx/agent-skills
 | Strategy | Budget | Instrument | Leverage | Mode |
 |----------|--------|------------|----------|------|
 | BTC Trend | 400 USDT margin | BTC-USDT-SWAP | 50x isolated | Long-biased |
+| RAVE Dedicated Short | Up to 200 USDT (uses BTC budget if BTC inactive) | RAVE-USDT-SWAP | 10x isolated | Short only |
 | Volatility Grid | 100 USDT total | Top-5 gainer SWAPs | 10x isolated | Long or Short grid |
 
 ---
@@ -43,9 +49,16 @@ npx skills add okx/agent-skills
 
 Execute this skill every 5 minutes. Each cycle:
 1. Load persistent state from `state.json`
-2. Run BTC strategy phase
-3. Run volatility grid strategy phase
-4. Save updated state to `state.json`
+2. Run account check
+3. Run BTC strategy phase
+4. Run RAVE dedicated short phase
+5. Run volatility grid strategy phase
+6. Save updated state to `state.json`
+
+All okx CLI commands must be run with:
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx ...
+```
 
 State file schema:
 ```json
@@ -57,6 +70,14 @@ State file schema:
     "avg_entry_price": 0,
     "total_sz": 0,
     "remaining_pct": 100
+  },
+  "rave_position": {
+    "active": false,
+    "avg_entry_price": 0,
+    "total_sz": 0,
+    "remaining_pct": 100,
+    "signal_count": 0,
+    "swing_high": 0
   },
   "grid_bots": [
     {
@@ -79,17 +100,18 @@ State file schema:
 ## PHASE 1 — Account Check (every cycle, run first)
 
 ```bash
-okx account balance --profile live
-okx account positions --profile live
-okx bot grid orders --profile live
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx account balance --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx account positions --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx bot grid orders --profile tradebot
 ```
 
 Extract:
 - `free_usdt`: available USDT in trading account
 - `btc_pos`: BTC-USDT-SWAP position size, side, avg entry price, uPnL
+- `rave_pos`: RAVE-USDT-SWAP position size, side, avg entry price, uPnL
 - `active_grids`: list of running grid bots with algoId and instId
 
-Reconcile with state.json. If a position exists in exchange but not in state, add it. If state shows active but exchange shows closed, clear it from state.
+Reconcile with state.json. If a position exists on exchange but not in state, add it. If state shows active but exchange shows closed, clear it from state.
 
 ---
 
@@ -101,7 +123,7 @@ If `state.btc_activated == false`:
 
 ```bash
 # Get 1H MACD for BTC
-okx market indicator MACD BTC-USDT-SWAP --bar 1H
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator MACD BTC-USDT-SWAP --bar 1H --profile tradebot
 ```
 
 Parse the DIF line (fast line) value from the response.
@@ -113,20 +135,12 @@ If `state.btc_activated == true`: always proceed to Step 2B.
 ### Step 2B — Gather BTC Signals
 
 ```bash
-# 5m RSI(14)
-okx market indicator RSI BTC-USDT-SWAP --period 14 --bar 5m
-
-# 5m CCI(20)
-okx market indicator CCI BTC-USDT-SWAP --period 20 --bar 5m
-
-# Current price
-okx market ticker BTC-USDT-SWAP
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator RSI BTC-USDT-SWAP --period 14 --bar 5m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator CCI BTC-USDT-SWAP --period 20 --bar 5m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker BTC-USDT-SWAP --profile tradebot
 ```
 
-Extract current values:
-- `rsi_5m`: current RSI value
-- `cci_5m`: current CCI value
-- `btc_price`: current mark price
+Extract: `rsi_5m`, `cci_5m`, `btc_price`
 
 ### Step 2C — BTC Entry Logic
 
@@ -136,11 +150,8 @@ Oversold condition: `rsi_5m < 30` AND `cci_5m < -100`
 
 If condition met:
 ```bash
-# Set isolated leverage
-okx swap set-leverage --instId BTC-USDT-SWAP --lever 50 --mgnMode isolated --profile live
-
-# Get contract specs to calculate sz
-okx market instruments --instType SWAP --instId BTC-USDT-SWAP
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap set-leverage --instId BTC-USDT-SWAP --lever 50 --mgnMode isolated --posSide long --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market instruments --instType SWAP --instId BTC-USDT-SWAP --profile tradebot
 ```
 
 Calculate for 50% of 400 USDT = 200 USDT margin:
@@ -151,93 +162,217 @@ sz = floor(notional / (btc_price * ctVal))
 ```
 
 ```bash
-okx swap place --instId BTC-USDT-SWAP --side buy --ordType market \
-  --sz {sz} --posSide long --tdMode isolated --profile live
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId BTC-USDT-SWAP --side buy --ordType market \
+  --sz {sz} --posSide long --tdMode isolated --tag agentTradeKit --profile tradebot
 ```
 
-Update state:
-```json
-{
-  "btc_position": {
-    "active": true,
-    "entry_count": 1,
-    "avg_entry_price": btc_price,
-    "total_sz": sz,
-    "remaining_pct": 100
-  }
-}
-```
+Update state btc_position (active=true, entry_count=1, avg_entry_price, total_sz, remaining_pct=100).
 
-Log: "BTC Entry 1/2: {sz} contracts at {btc_price}, margin 200 USDT, 50x isolated"
-
-**If `state.btc_position.entry_count == 1`** (first entry exists, waiting for second):
-
-If oversold condition met again:
+**If `state.btc_position.entry_count == 1`** — on next oversold signal:
 ```bash
-# Add remaining 50% — another 200 USDT margin
-# sz same calculation as above
-okx swap place --instId BTC-USDT-SWAP --side buy --ordType market \
-  --sz {sz} --posSide long --tdMode isolated --profile live
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId BTC-USDT-SWAP --side buy --ordType market \
+  --sz {sz} --posSide long --tdMode isolated --tag agentTradeKit --profile tradebot
 ```
-
-Recalculate average entry price:
-```
-new_avg = (entry1_price * sz1 + entry2_price * sz2) / (sz1 + sz2)
-```
-
-Update state:
-```json
-{
-  "entry_count": 2,
-  "avg_entry_price": new_avg,
-  "total_sz": sz1 + sz2
-}
-```
+Recalculate weighted average entry price. Update state entry_count=2.
 
 ### Step 2D — BTC Exit Logic
 
-**Only if active BTC position exists** (`state.btc_position.active == true`):
+**Only if active BTC position** (`state.btc_position.active == true`):
 
 ```bash
-okx market indicator RSI BTC-USDT-SWAP --period 14 --bar 5m
-okx market indicator CCI BTC-USDT-SWAP --period 20 --bar 5m
-okx market ticker BTC-USDT-SWAP
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator RSI BTC-USDT-SWAP --period 14 --bar 5m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator CCI BTC-USDT-SWAP --period 20 --bar 5m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker BTC-USDT-SWAP --profile tradebot
 ```
 
-**Stop Loss** — check first, highest priority:
+**Stop Loss** — highest priority:
 ```
 sl_price = state.btc_position.avg_entry_price * (1 - 0.012)
 ```
 If `btc_price <= sl_price`:
 ```bash
-okx swap place --instId BTC-USDT-SWAP --side sell --ordType market \
-  --sz {state.btc_position.total_sz} --posSide long \
-  --tdMode isolated --reduceOnly --profile live
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId BTC-USDT-SWAP --side sell --ordType market \
+  --sz {state.btc_position.total_sz} --posSide long --tdMode isolated --reduceOnly \
+  --tag agentTradeKit --profile tradebot
 ```
-Clear btc_position from state. Log: "BTC STOP LOSS triggered at {btc_price}, avg entry was {avg_entry_price}"
+Clear btc_position from state.
 
 **Take Profit ① — CCI > 100** (if `remaining_pct == 100`):
-If `cci_5m > 100`:
 ```
 close_sz = floor(state.btc_position.total_sz * 0.20)
 ```
 ```bash
-okx swap place --instId BTC-USDT-SWAP --side sell --ordType market \
-  --sz {close_sz} --posSide long --tdMode isolated --reduceOnly --profile live
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId BTC-USDT-SWAP --side sell --ordType market \
+  --sz {close_sz} --posSide long --tdMode isolated --reduceOnly \
+  --tag agentTradeKit --profile tradebot
 ```
-Update `state.btc_position.remaining_pct = 80`
-Log: "BTC TP1: closed 20% at {btc_price} (CCI={cci_5m})"
+Update `remaining_pct = 80`.
 
 **Take Profit ② — RSI > 70** (close ALL remaining):
-If `rsi_5m > 70`:
 ```
-remaining_sz = floor(state.btc_position.total_sz * state.btc_position.remaining_pct / 100)
+remaining_sz = floor(state.btc_position.total_sz * remaining_pct / 100)
 ```
 ```bash
-okx swap place --instId BTC-USDT-SWAP --side sell --ordType market \
-  --sz {remaining_sz} --posSide long --tdMode isolated --reduceOnly --profile live
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId BTC-USDT-SWAP --side sell --ordType market \
+  --sz {remaining_sz} --posSide long --tdMode isolated --reduceOnly \
+  --tag agentTradeKit --profile tradebot
 ```
-Clear btc_position from state. Log: "BTC TP2: closed all remaining {remaining_pct}% at {btc_price} (RSI={rsi_5m})"
+Clear btc_position from state.
+
+---
+
+## PHASE 2.5 — RAVE Dedicated Short (up to 200 USDT, 10x isolated)
+
+**Budget rule**: If `state.btc_position.active == false`, RAVE may use up to 200 USDT. Otherwise max 100 USDT.
+
+### Step 2.5A — Multi-Timeframe Bearish Signal Detection
+
+Gather RAVE data across 4 timeframes:
+
+```bash
+# 4H signals
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator RSI RAVE-USDT-SWAP --period 14 --bar 4H --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator MACD RAVE-USDT-SWAP --bar 4H --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market candles RAVE-USDT-SWAP --bar 4H --limit 20 --profile tradebot
+
+# 1H signals
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator RSI RAVE-USDT-SWAP --period 14 --bar 1H --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator MACD RAVE-USDT-SWAP --bar 1H --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market candles RAVE-USDT-SWAP --bar 1H --limit 20 --profile tradebot
+
+# 5m signals
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator RSI RAVE-USDT-SWAP --period 14 --bar 5m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator MACD RAVE-USDT-SWAP --bar 5m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market candles RAVE-USDT-SWAP --bar 5m --limit 20 --profile tradebot
+
+# Current price
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker RAVE-USDT-SWAP --profile tradebot
+```
+
+**Bearish signals to detect** (any ONE is sufficient to trigger initial entry):
+
+1. **RSI Bearish Divergence (any TF)**: On the last 20 candles, find two swing highs. If price swing_high_2 > swing_high_1 (higher high) but RSI at swing_high_2 < RSI at swing_high_1 (lower RSI) → bearish divergence confirmed.
+
+2. **MACD Death Cross (any TF)**: DIF crosses below DEA on the most recent candle → death cross signal.
+
+3. **MACD Bearish Divergence (any TF)**: Two DIF/DEA crossover points. If crossover_2_DIF < crossover_1_DIF but price made higher high → MACD bearish divergence.
+
+4. **Top Fractal (顶分型)**: In 4H or 1H candles, find a 3-candle pattern where middle candle has the highest high → fractal top formed.
+
+5. **RSI Overbought (any TF)**: RSI > 70 after a major rally → potential reversal zone.
+
+Count total number of bearish signals found across all timeframes: `signal_count`.
+
+**Identify swing_high**: Find the highest price across the last 20 candles in the signal-triggering timeframe. This is the stop-loss reference level.
+
+### Step 2.5B — RAVE Entry Logic
+
+**If `state.rave_position.active == false` AND `signal_count >= 1`**:
+
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap set-leverage --instId RAVE-USDT-SWAP --lever 10 --mgnMode isolated --posSide short --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market instruments --instType SWAP --instId RAVE-USDT-SWAP --profile tradebot
+```
+
+Initial entry = 40 USDT margin:
+```
+notional = 40 * 10 = 400 USDT
+sz = floor(notional / rave_price) — use ctVal from instruments response
+```
+
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side sell --ordType market \
+  --sz {sz} --posSide short --tdMode isolated --tag agentTradeKit --profile tradebot
+```
+
+Update state:
+```json
+{
+  "rave_position": {
+    "active": true,
+    "avg_entry_price": rave_price,
+    "total_sz": sz,
+    "remaining_pct": 100,
+    "signal_count": signal_count,
+    "swing_high": swing_high_price
+  }
+}
+```
+
+**If `state.rave_position.active == true` AND new signals detected** (signal_count > state.rave_position.signal_count):
+
+Add-on position (scale in) with additional margin based on signal count:
+- 2 signals: add 40 USDT margin
+- 3+ signals: add 60 USDT margin (total up to budget limit)
+
+Check budget limit first:
+```
+current_margin = state.rave_position.total_sz * state.rave_position.avg_entry_price / 10
+addon_allowed = rave_budget - current_margin
+```
+If `addon_allowed <= 0`: skip add-on.
+
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side sell --ordType market \
+  --sz {addon_sz} --posSide short --tdMode isolated --tag agentTradeKit --profile tradebot
+```
+
+Recalculate avg_entry_price (weighted average). Update signal_count and total_sz.
+
+### Step 2.5C — RAVE Exit Logic
+
+**Only if `state.rave_position.active == true`**:
+
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker RAVE-USDT-SWAP --profile tradebot
+```
+
+**Stop Loss — highest priority**:
+If `rave_price >= state.rave_position.swing_high`:
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side buy --ordType market \
+  --sz {state.rave_position.total_sz} --posSide short --tdMode isolated --reduceOnly \
+  --tag agentTradeKit --profile tradebot
+```
+Clear rave_position from state. Log: "RAVE STOP LOSS: price {rave_price} broke above swing_high {swing_high}"
+
+**Take Profit calculation**:
+```
+drop_pct = (state.rave_position.avg_entry_price - rave_price) / state.rave_position.avg_entry_price * 100
+```
+
+**TP① — drop >= 50%** (if `remaining_pct == 100`):
+```
+close_sz = floor(state.rave_position.total_sz * 0.30)
+```
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side buy --ordType market \
+  --sz {close_sz} --posSide short --tdMode isolated --reduceOnly \
+  --tag agentTradeKit --profile tradebot
+```
+Update `remaining_pct = 70`. Log: "RAVE TP1: closed 30% at {rave_price} (-{drop_pct:.1f}%)"
+
+**TP② — drop >= 70%** (if `remaining_pct == 70`):
+```
+close_sz = floor(state.rave_position.total_sz * 0.40)
+```
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/od/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side buy --ordType market \
+  --sz {close_sz} --posSide short --tdMode isolated --reduceOnly \
+  --tag agentTradeKit --profile tradebot
+```
+Update `remaining_pct = 30`. Log: "RAVE TP2: closed 40% at {rave_price} (-{drop_pct:.1f}%)"
+
+**TP③ — drop >= 90%** (close all remaining):
+```
+remaining_sz = floor(state.rave_position.total_sz * remaining_pct / 100)
+```
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side buy --ordType market \
+  --sz {remaining_sz} --posSide short --tdMode isolated --reduceOnly \
+  --tag agentTradeKit --profile tradebot
+```
+Clear rave_position from state. Log: "RAVE TP3: fully closed at {rave_price} (-{drop_pct:.1f}%)"
 
 ---
 
@@ -246,201 +381,123 @@ Clear btc_position from state. Log: "BTC TP2: closed all remaining {remaining_pc
 ### Step 3A — Scan Top-5 Gainers
 
 ```bash
-okx market tickers SWAP --json
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market tickers SWAP --profile tradebot
 ```
 
-From the JSON response, sort all SWAP instruments by `change24h` descending.
-Select top 5 instruments. Extract their `instId` values (format: `TOKEN-USDT-SWAP`).
-
+Sort all SWAP instruments by `change24h` descending. Select top 5 (exclude RAVE-USDT-SWAP — handled separately).
 Skip any instrument already in `state.grid_bots`.
 
 ### Step 3B — Divergence Detection on Candidates
 
-For each candidate token (not already in active grid bots):
+For each candidate token:
 
 ```bash
-# Get last 20 5m candles (OHLCV)
-okx market candles {instId} --bar 5m --limit 20
-
-# Get 5m RSI(14) — current and historical values
-okx market indicator RSI {instId} --period 14 --bar 5m --limit 20
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market candles {instId} --bar 5m --limit 20 --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator RSI {instId} --period 14 --bar 5m --limit 20 --profile tradebot
 ```
 
-**Identify swing points in last 20 candles:**
+Find swing lows and highs in last 20 candles (local extrema with 2-candle neighbors).
 
-Find the two most recent swing lows (local price minima) and swing highs (local price maxima).
-A swing low = candle whose low is lower than the 2 candles on each side.
-A swing high = candle whose high is higher than the 2 candles on each side.
+**Bullish Divergence (底背离)** → LONG grid:
+- Price: swing_low_2 < swing_low_1 (lower low)
+- RSI: rsi_at_low_2 > rsi_at_low_1 (higher RSI)
 
-**Bullish Divergence (底背离) — triggers LONG grid:**
-- Price: swing_low_2 (more recent) < swing_low_1 (earlier) — price made lower low
-- RSI: rsi_at_swing_low_2 > rsi_at_swing_low_1 — RSI made higher low
-- Both swing lows must be within the last 20 candles
-
-**Bearish Divergence (顶背离) — triggers SHORT grid:**
-- Price: swing_high_2 (more recent) > swing_high_1 (earlier) — price made higher high
-- RSI: rsi_at_swing_high_2 < rsi_at_swing_high_1 — RSI made lower high
-- Both swing highs must be within the last 20 candles
-
-If divergence detected, record:
-- `divergence_type`: "bullish" or "bearish"
-- `divergence_low`: the lower of the two swing lows (for bullish SL reference)
-- `divergence_high`: the higher of the two swing highs (for bearish SL reference)
+**Bearish Divergence (顶背离)** → SHORT grid:
+- Price: swing_high_2 > swing_high_1 (higher high)
+- RSI: rsi_at_high_2 < rsi_at_high_1 (lower RSI)
 
 ### Step 3C — OI Check and Position Sizing
 
-For each token with divergence signal:
-
 ```bash
-okx market open-interest --instType SWAP --instId {instId}
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market open-interest --instType SWAP --instId {instId} --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator MACD {instId} --bar 5m --limit 20 --profile tradebot
 ```
 
-Record current OI as `current_oi`.
+`oi_pct_change = (current_oi - entry_oi) / entry_oi * 100`
 
-Determine `entry_oi` (OI at the time of divergence swing point):
-- Use the OI value at the candle index of the more recent swing point
-- If OI data not available at that point, use current OI as baseline
+**Position size table:**
 
-OI increase: `oi_pct_change = (current_oi - entry_oi) / entry_oi * 100`
-
-**Check MACD divergence for add-on signal:**
-```bash
-okx market indicator MACD {instId} --bar 5m --limit 20
-```
-
-Identify the two most recent DIF/DEA crossover points within 20 candles.
-- A crossover point = candle where DIF crosses DEA (from below for golden cross, from above for death cross)
-- Record the MACD value (DIF value) at each crossover point
-
-**MACD Bullish Divergence:** crossover_2_macd > crossover_1_macd BUT price made lower low → confirmed bullish
-**MACD Bearish Divergence:** crossover_2_macd < crossover_1_macd BUT price made higher high → confirmed bearish
-
-**Position size determination:**
-
-| Signals present | OI increase | Position size |
-|----------------|-------------|---------------|
+| Signals | OI change | Size |
+|---------|-----------|------|
 | RSI divergence only | < 10% | 20 USDT |
 | RSI divergence only | ≥ 10% | 30 USDT |
 | RSI + MACD divergence | < 10% | 40 USDT |
-| RSI + MACD divergence | ≥ 10% | 100 USDT (exclusive) |
+| RSI + MACD divergence | ≥ 10% | 100 USDT (exclusive, close other bots first) |
 
-If position size would be 100 USDT: close any existing second grid bot first, use full 100 USDT budget.
-If total of existing grids + new position > 100 USDT: skip this token (budget exhausted).
+If total of existing grids + new > 100 USDT: skip this token.
 
 ### Step 3D — Grid Bot Creation
 
 ```bash
-# Get ATR(14) on 5m
-okx market indicator ATR {instId} --period 14 --bar 5m
-
-# Get current price
-okx market ticker {instId}
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator ATR {instId} --period 14 --bar 5m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker {instId} --profile tradebot
 ```
 
-Calculate grid parameters:
 ```
-center_price = current mark price
-atr = ATR(14, 5m) value
-grid_min = center_price - (1.5 * atr)
-grid_max = center_price + (1.5 * atr)
-grid_num = 10
+grid_min = current_price - (1.5 * atr)
+grid_max = current_price + (1.5 * atr)
 ```
 
-For **bullish divergence** (LONG grid):
 ```bash
-okx swap set-leverage --instId {instId} --lever 10 --mgnMode isolated --profile live
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap set-leverage --instId {instId} --lever 10 --mgnMode isolated --profile tradebot
 
-okx bot grid create \
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx bot grid create \
   --instId {instId} \
   --algoOrdType contract_grid \
   --minPx {grid_min} \
   --maxPx {grid_max} \
   --gridNum 10 \
-  --direction long \
+  --direction {long|short} \
   --lever 10 \
   --sz {position_size} \
-  --profile live
+  --tag agentTradeKit \
+  --profile tradebot
 ```
 
-For **bearish divergence** (SHORT grid):
-```bash
-okx swap set-leverage --instId {instId} --lever 10 --mgnMode isolated --profile live
-
-okx bot grid create \
-  --instId {instId} \
-  --algoOrdType contract_grid \
-  --minPx {grid_min} \
-  --maxPx {grid_max} \
-  --gridNum 10 \
-  --direction short \
-  --lever 10 \
-  --sz {position_size} \
-  --profile live
-```
-
-Save to state.grid_bots:
-```json
-{
-  "algoId": "<returned algoId>",
-  "instId": "{instId}",
-  "direction": "long|short",
-  "entry_oi": current_oi,
-  "initial_sz": position_size,
-  "current_sz": position_size,
-  "stop_loss_px": divergence_low (for long) or divergence_high (for short),
-  "divergence_high": swing_high_price,
-  "divergence_low": swing_low_price,
-  "has_macd_confirmed": true|false
-}
-```
+Save to state.grid_bots with algoId, instId, direction, entry_oi, initial_sz, current_sz, stop_loss_px.
 
 ### Step 3E — Grid Bot Management (existing bots)
 
-For each bot in `state.grid_bots`:
-
 ```bash
-okx bot grid details --algoId {algoId} --profile live
-okx market ticker {instId}
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx bot grid details --algoId {algoId} --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker {instId} --profile tradebot
 ```
 
-Extract: `current_price`, `bot_pnl_pct` (unrealized PnL as % of initial investment)
-
-**Stop Loss Check:**
-- Long grid: if `current_price < state.stop_loss_px` → stop bot
-- Short grid: if `current_price > state.stop_loss_px` → stop bot
-
+**Stop Loss**: Long grid if `price < stop_loss_px`, Short grid if `price > stop_loss_px`:
 ```bash
-okx bot grid stop --algoId {algoId} --profile live
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx bot grid stop --algoId {algoId} --profile tradebot
 ```
-Remove from state.grid_bots. Log: "Grid SL triggered: {instId} price={current_price} sl={stop_loss_px}"
 
-**Take Profit — Partial Close (close portion of bot by reducing sz):**
+**Take Profit (stop + recreate with reduced sz)**:
+- TP①: pnl ≥ +60% → reduce to 50% sz
+- TP②: pnl ≥ +100% → reduce to 25% sz
+- TP③: pnl ≥ +200% → stop completely
 
-TP①: `bot_pnl_pct >= 60%` AND `current_sz == initial_sz`:
-- Target: reduce position to 50% of initial
-- Stop bot, immediately recreate with same parameters but `sz = initial_sz * 0.50`
-- Update `state.current_sz = initial_sz * 0.50`
-- Log: "Grid TP1: {instId} +60%, reduced to 50% sz"
+Grid recreation uses same commands as Step 3D with updated sz.
 
-TP②: `bot_pnl_pct >= 100%` AND `current_sz == initial_sz * 0.50`:
-- Target: reduce to 25% of initial
-- Stop bot, recreate with `sz = initial_sz * 0.25`
-- Update `state.current_sz = initial_sz * 0.25`
-- Log: "Grid TP2: {instId} +100%, reduced to 25% sz"
+---
 
-TP③: `bot_pnl_pct >= 200%` AND `current_sz == initial_sz * 0.25`:
-- Stop bot completely, do not recreate
-```bash
-okx bot grid stop --algoId {algoId} --profile live
+## AI Reasoning Step (Required for Competition)
+
+Before executing any trade, explicitly state your reasoning:
+
+1. **Market Assessment**: What are the current indicator values? (exact numbers)
+2. **Signal Evaluation**: Which conditions are met? Which are not? Why does this trigger action?
+3. **Risk Check**: Current account balance, existing positions, available budget?
+4. **Decision**: Enter / Exit / Hold / Skip — and exactly why
+5. **Action**: Execute the specific okx CLI command
+
+Example reasoning log:
 ```
-Remove from state.grid_bots. Log: "Grid TP3: {instId} +200%, fully closed. Scanning for next opportunity."
-
-**MACD Add-on Check** (for bots where `has_macd_confirmed == false`):
-
-Run MACD divergence check (Step 3C) again for this instId.
-If MACD divergence now confirmed AND `oi_pct_change >= 10%`:
-- Stop current bot, recreate with next position size tier (max 100 USDT total)
-- Set `has_macd_confirmed = true`
+[CYCLE 2026-04-18 14:35] RAVE Strategy Check:
+- 4H RSI: 72.3 (overbought, bearish signal ✓)
+- 1H MACD: DIF just crossed below DEA (death cross ✓)
+- 5m RSI divergence: swing_high_2=25.1 > swing_high_1=23.8, RSI_2=68 < RSI_1=74 (bearish ✓)
+- Signal count: 3 → add-on entry triggered
+- Current position: 1 contract @ 23.7848, remaining 100%
+- Budget available: 120 USDT (BTC inactive)
+- Action: Add-on 40 USDT margin short position
+```
 
 ---
 
@@ -458,24 +515,28 @@ Every 5 minutes:
 │   ├─ 1 entry? → check 5m RSI+CCI → add second entry if oversold
 │   └─ Has position? → check SL → check CCI TP1 → check RSI TP2
 │
-├─ 4. PHASE 3: Grid Strategy
+├─ 4. PHASE 2.5: RAVE Dedicated Short
+│   ├─ No position? → scan 4H/1H/5m for bearish signals → enter if ≥1 signal
+│   ├─ Has position? → check if new signals appeared → add-on if signal_count increased
+│   └─ Has position? → check SL (above swing_high) → check TP1/TP2/TP3
+│
+├─ 5. PHASE 3: Grid Strategy (exclude RAVE)
 │   ├─ Scan top-5 gainers
 │   ├─ Check divergence on candidates
 │   ├─ Check OI + MACD for sizing
 │   ├─ Create new grid bots (if budget available)
 │   └─ Manage existing bots (SL / TP / add-on)
 │
-└─ 5. Save state.json
+└─ 6. Save state.json
 ```
 
 ---
 
 ## Edge Cases
 
-- **BTC liquidation risk**: At 50x isolated, liquidation occurs ~2% adverse move. SL at -1.2% exits before liquidation. If SL order fails to fill (gap down), force market close on next cycle if price < avg_entry * 0.975.
-- **Insufficient balance**: If `free_usdt < 200`, skip new BTC entry. If `free_usdt < 20`, skip new grid bots.
-- **Grid creation fails**: Log error, try next token in top-5 list.
-- **Token suspended**: Skip token, move to next candidate.
-- **TP partial close — bot recreation fails**: Retry once. If still fails, stop bot entirely and log.
-- **Multiple divergence signals same token**: Use the most recent confirmed divergence only.
+- **BTC liquidation risk**: At 50x isolated, liquidation occurs ~2% adverse move. SL at -1.2% exits before liquidation.
+- **RAVE price gap**: If RAVE gaps above swing_high, market close immediately on detection.
+- **Insufficient balance**: If `free_usdt < 200`, skip new BTC entry. If `free_usdt < 20`, skip new grids.
+- **Grid creation fails**: Log error, try next token in top-5.
 - **state.json missing**: Initialize with default empty state and proceed.
+- **Missing tag**: ALWAYS include `--tag agentTradeKit` on ALL swap place and bot grid create commands. This is required for leaderboard counting.
