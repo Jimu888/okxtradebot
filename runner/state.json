@@ -9,12 +9,13 @@
   },
   "rave_position": {
     "active": true,
-    "avg_entry_price": 23.7848,
-    "total_sz": 1,
+    "avg_entry_price": 22.062,
+    "total_sz": 2,
     "remaining_pct": 100,
-    "signal_count": 1,
+    "signal_count": 2,
     "swing_high": 28.5,
-    "needs_retag": true
+    "vegas_addon_count": 0,
+    "bb_addon_count": 0
   },
   "grid_bots": []
 }

@@ -77,7 +77,9 @@ State file schema:
     "total_sz": 0,
     "remaining_pct": 100,
     "signal_count": 0,
-    "swing_high": 0
+    "swing_high": 0,
+    "vegas_addon_count": 0,
+    "bb_addon_count": 0
   },
   "grid_bots": [
     {
@@ -319,6 +321,70 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
 
 Recalculate avg_entry_price (weighted average). Update signal_count and total_sz.
 
+### Step 2.5B2 — Vegas Channel Rebound Add-on (1m)
+
+**Only if `state.rave_position.active == true`** AND budget has room AND `state.rave_position.vegas_addon_count < 3`:
+
+```bash
+# 1m Vegas Channel: EMA(144) = inner boundary, EMA(169) = outer boundary
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator EMA RAVE-USDT-SWAP --period 144 --bar 1m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator EMA RAVE-USDT-SWAP --period 169 --bar 1m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker RAVE-USDT-SWAP --profile tradebot
+```
+
+**Vegas Channel Rebound condition** (all must be true):
+1. `rave_price >= ema_144` — price has rebounded up to at least the inner channel boundary
+2. `rave_price <= ema_169 * 1.01` — price is at/near the channel, not broken far above it
+3. `rave_price < state.rave_position.avg_entry_price` — price is still below our entry (still in profit zone for short)
+4. Budget has room: `current_margin < rave_budget_limit`
+
+**AI Reasoning**: Current price={rave_price}, EMA144={ema_144}, EMA169={ema_169}. Is price touching the Vegas Channel from below? Is this a rebound into resistance?
+
+If all conditions met — add-on 40 USDT margin:
+```
+notional = 40 * leverage (use current effective leverage, typically 3x for RAVE)
+sz = floor(notional / (rave_price * ctVal))
+```
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side sell --ordType market \
+  --sz {sz} --posSide short --tdMode isolated --tag agentTradeKit --profile tradebot
+```
+
+Recalculate avg_entry_price (weighted average). Update total_sz.
+Increment `state.rave_position.vegas_addon_count` by 1.
+
+Note: vegas_addon_count resets to 0 when rave_position is cleared (TP or SL).
+
+### Step 2.5B3 — BB Middle Band Rebound Add-on (1m)
+
+**Only if `state.rave_position.active == true`** AND budget has room AND `state.rave_position.bb_addon_count < 3`:
+
+```bash
+# 1m Bollinger Bands (20, 2) — middle band = SMA(20)
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator BOLL RAVE-USDT-SWAP --period 20 --bar 1m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker RAVE-USDT-SWAP --profile tradebot
+```
+
+Parse response: `mid` = middle band (SMA20), `upper` = upper band, `lower` = lower band.
+
+**BB Midline Rebound condition** (all must be true):
+1. `rave_price >= mid * 0.99` AND `rave_price <= mid * 1.01` — price is touching/at the middle band (±1% tolerance)
+2. `rave_price < state.rave_position.avg_entry_price` — still in profit zone for short
+3. Budget has room: `current_margin < rave_budget_limit`
+4. This cycle's price came from below mid (rebounding up, not falling through it) — check that previous price < mid
+
+**AI Reasoning**: Current price={rave_price}, BB_mid={mid}, BB_upper={upper}, BB_lower={lower}. Is price touching the BB middle band as resistance? Is it rebounding into it from below?
+
+If all conditions met — add-on 40 USDT margin:
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side sell --ordType market \
+  --sz {sz} --posSide short --tdMode isolated --tag agentTradeKit --profile tradebot
+```
+
+Recalculate avg_entry_price. Update total_sz. Increment `state.rave_position.bb_addon_count` by 1.
+
+Note: bb_addon_count resets to 0 when rave_position is cleared.
+
 ### Step 2.5C — RAVE Exit Logic
 
 **Only if `state.rave_position.active == true`**:
@@ -357,7 +423,7 @@ Update `remaining_pct = 70`. Log: "RAVE TP1: closed 30% at {rave_price} (-{drop_
 close_sz = floor(state.rave_position.total_sz * 0.40)
 ```
 ```bash
-NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/od/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side buy --ordType market \
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side buy --ordType market \
   --sz {close_sz} --posSide short --tdMode isolated --reduceOnly \
   --tag agentTradeKit --profile tradebot
 ```
