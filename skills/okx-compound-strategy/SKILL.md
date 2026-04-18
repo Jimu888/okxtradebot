@@ -14,7 +14,7 @@ description: >
 license: MIT
 metadata:
   author: compound-strategy
-  version: "3.0.0"
+  version: "3.1.0"
   category: compound-strategy
   dependencies: okx-cex-market, okx-cex-trade, okx-cex-bot, okx-cex-portfolio
 ---
@@ -196,58 +196,64 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator three-soldiers BTC-USDT-SWAP --bar 5m --profile tradebot
 ```
 
-### Step 2C — BTC Entry Confidence Scoring
+### Step 2C — BTC Entry Weighted Scoring (total 100 pts)
 
 **Only if no active BTC position** (`state.btc_position.active == false`):
 
-**Gate condition** (must pass to proceed): `rsi_5m < 35` AND `cci_5m < -80`
-If gate fails → skip entry, output: "BTC entry gate not met: RSI={value}, CCI={value}. No oversold condition."
+**Gate condition** (must pass before scoring): `rsi_5m < 35` AND `cci_5m < -80`
+Gate fails → output skip reason and stop. Gate passes → proceed to full scoring.
 
-If gate passes, **score each dimension (0-10 total)**:
+**Weighted scoring table:**
 
-| Dimension | Condition | Points |
-|-----------|-----------|--------|
-| RSI depth | < 25 (deep oversold) | +3 / < 30 → +2 / < 35 → +1 |
-| CCI depth | < -150 | +2 / < -100 → +1 |
-| MFI (5m) | < 25 (heavy outflow = capitulation) | +2 / < 35 → +1 |
-| Candlestick | bull-engulf OR three-soldiers detected | +1 |
-| Market context | Baseline adjustment from Phase 0.5 | +1 / 0 / -1 |
+| # | Dimension | Weight | Scoring Rules |
+|---|-----------|--------|---------------|
+| 1 | RSI 5m (momentum depth) | **20 pts** | <20→20 / <25→16 / <30→12 / <35→6 / ≥35→0 |
+| 2 | CCI 5m (oscillator depth) | **15 pts** | <-200→15 / <-150→12 / <-100→8 / <-80→4 / ≥-80→0 |
+| 3 | MFI 5m (capital outflow) | **20 pts** | <20→20 / <30→15 / <40→8 / ≥40→0 |
+| 4 | Supertrend 1H (trend) | **15 pts** | UP→15 / DOWN→0 |
+| 5 | Long/Short ratio (positioning) | **10 pts** | short>65%→10 / short>55%→6 / balanced→3 / long>55%→0 |
+| 6 | Funding rate (market bias) | **10 pts** | <-0.02%→10 / <-0.01%→7 / ±0.01%→4 / >0.02%→0 |
+| 7 | Candlestick pattern (reversal) | **10 pts** | bull-engulf OR three-soldiers→10 / none→0 |
 
-**AI output required:**
+**Total = sum of all 7 dimensions = max 100 pts**
+
+**AI must output the scoring block:**
 ```
-[BTC ENTRY SCORE]
-RSI={value} → {pts}pts | CCI={value} → {pts}pts | MFI={value} → {pts}pts
-Pattern={detected/none} → {pts}pts | Context adj={+1/0/-1}pts
-Total={score}/10
+[BTC入场加权评分]
+① RSI={值}        → {分}/20分
+② CCI={值}        → {分}/15分
+③ MFI={值}        → {分}/20分
+④ Supertrend={方向} → {分}/15分
+⑤ 多空比=多{%}/空{%} → {分}/10分
+⑥ 资金费率={值}    → {分}/10分
+⑦ K线形态={结果}   → {分}/10分
+──────────────────────────────
+总分: {分}/100分
 
-Decision: {ENTER FULL (≥7) / ENTER HALF (5-6) / SKIP (<5)}
-Reasoning: [2-3 sentences explaining WHY this score, what the key factors are,
-            what could go wrong, and why this is or isn't a good entry]
+决策: {满仓入场≥70 / 半仓入场50-69 / 跳过<50}
+保证金: {200U / 100U / 0U}
+推理: [2-3句：哪些维度是关键支撑，哪些维度拖低了分数，
+      当前市场状态下这笔交易的核心逻辑是什么，最大风险在哪里]
 ```
 
 **Execution:**
-- Score ≥ 7 → full entry (200 USDT margin)
-- Score 5-6 → half entry (100 USDT margin)
-- Score < 5 → skip
+- Score ≥ 70 → full entry, margin = 200 USDT
+- Score 50–69 → half entry, margin = 100 USDT
+- Score < 50 → skip
 
 ```bash
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap set-leverage --instId BTC-USDT-SWAP --lever 50 --mgnMode isolated --posSide long --profile tradebot
 ```
-
 ```
-notional = margin_usdt * 50
-ctVal = 0.01 BTC
-sz = floor(notional / (btc_price * ctVal))
+sz = floor(margin * 50 / (btc_price * 0.01))
 ```
-
 ```bash
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId BTC-USDT-SWAP --side buy --ordType market \
   --sz {sz} --posSide long --tdMode isolated --tag agentTradeKit --profile tradebot
 ```
 
 Update state: active=true, entry_count=1, avg_entry_price, total_sz, remaining_pct=100.
-
-**Second entry** (entry_count==1, next oversold signal with score ≥ 5): place same sz, update weighted avg.
+**Second entry** (entry_count==1, next signal with score ≥ 50): place same sz, update weighted avg.
 
 ### Step 2D — BTC Exit Logic
 
@@ -559,44 +565,48 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
 - **Bearish (顶背离)** → SHORT grid: price higher high + RSI lower high
 - **Neutral (no divergence)** → NEUTRAL grid if BBWidth confirms oscillation
 
-**Grid Environment Score (AI output required for each candidate):**
+**Grid Candidate Weighted Scoring (total 100 pts):**
+
+| # | Dimension | Weight | Scoring Rules |
+|---|-----------|--------|---------------|
+| 1 | 来源扫描 (signal source) | **20 pts** | 价格+OI双榜→20 / 仅OI榜→12 / 仅价格榜→8 |
+| 2 | RSI背离 (divergence) | **20 pts** | 确认背离→20 / 弱背离→10 / 无→0 |
+| 3 | MACD方向确认 | **15 pts** | 与方向一致→15 / 中性→5 / 反向→0 |
+| 4 | MFI 1H (资金流向) | **15 pts** | >70→15 / 50-70→10 / 30-50→5 / <30→0 |
+| 5 | BBWidth (网格适配度) | **10 pts** | 低/中震荡环境→10 / 强趋势→4 |
+| 6 | 情绪 (sentiment) | **10 pts** | 看多>50%且热度>200→10 / 看多>40%且热度>100→6 / 中性→3 / 看空→0 |
+| 7 | 资金费率 (funding) | **10 pts** | 正常±0.02%→10 / 极端正>0.05%→3 / 极端负<-0.05%→3 |
+
+**AI must output for each candidate:**
+```
+[网格候选加权评分: {instId}]
+① 来源={双榜/仅价格/仅OI}     → {分}/20分
+② RSI背离={确认/弱/无}        → {分}/20分
+③ MACD={金叉/死叉/中性}       → {分}/15分
+④ MFI(1H)={值}                → {分}/15分
+⑤ BBWidth={值}→{震荡/趋势}    → {分}/10分
+⑥ 情绪={看多%}，{mentions}条  → {分}/10分
+⑦ 资金费率={值}                → {分}/10分
+──────────────────────────────
+总分: {分}/100分
+
+决策: {部署网格≥70 / 减量部署50-69 / 少量试仓30-49 / 跳过<30}
+网格方向: {做多/做空/中性}
+仓位: {按评分区间，见下表}
+推理: [2-3句：哪些维度是核心驱动，信号之间是否有矛盾，
+      盈利逻辑是什么，最大风险在哪里]
+```
+
+### Step 3C — Position Sizing by Score
 
 ```
-[GRID CANDIDATE: {instId}]
-Source:     {Price-gainers only / OI-scan only / BOTH (highest conviction)}
-Divergence: {bullish/bearish/none} on 5m RSI
-MACD:       {golden cross / death cross / neutral}
-BBWidth:    {value} → {wide=trending, narrow=ranging, best grid: narrow/medium}
-MFI(1H):    {value} → {capital inflow if >50 / outflow if <50}
-Funding:    {value} → {interpretation}
-Sentiment:  {bullish%} bullish, {mentions} mentions → {hot/normal/cold}
+预算检查：existing_grid_total + new_size ≤ 100 USDT，否则跳过。
 
-Score: {0-10}
-Reasoning: [2-3 sentences: why enter or skip, what the edge is,
-            what the risk is, how signals align or conflict]
-Decision:   {DEPLOY GRID / SKIP}
-Grid type:  {long / short / neutral}
-Size:       {20/40/70/100 USDT based on score}
-```
-
-**Scoring guide:**
-- Both scans (price + OI): +2pts
-- RSI divergence confirmed: +2pts
-- MACD confirms direction: +1pt
-- MFI > 60 (inflow): +1pt
-- Sentiment bullish > 0.5 AND mentions > 100: +1pt
-- BBWidth suitable for grid type: +1pt
-- Funding rate not extreme against position: +1pt
-- Score ≥ 7 → deploy | 5-6 → deploy at half size | < 5 → skip
-
-### Step 3C — Position Sizing
-
-```
-If total of existing grids + new > 100 USDT: skip this token.
-Size by score:
-  Score ≥ 8 → min(100, remaining_budget) USDT
-  Score 6-7 → min(40, remaining_budget) USDT
-  Score 5   → min(20, remaining_budget) USDT
+按总分决定仓位：
+  ≥ 70分 → min(remaining_budget, 70) USDT  (高置信度)
+  50–69分 → min(remaining_budget, 40) USDT  (中等置信度)
+  30–49分 → min(remaining_budget, 20) USDT  (低置信度，试仓)
+  < 30分  → 跳过
 ```
 
 ### Step 3D — Grid Bot Creation
