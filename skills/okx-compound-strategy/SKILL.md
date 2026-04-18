@@ -89,12 +89,23 @@ State file schema:
       "algoId": "",
       "instId": "",
       "direction": "",
-      "entry_oi": 0,
-      "initial_sz": 0,
-      "current_sz": 0,
-      "stop_loss_px": 0,
-      "divergence_high": 0,
-      "divergence_low": 0
+      "maxPx": 0,
+      "minPx": 0,
+      "sl_px": 0,
+      "lever": 10,
+      "sz": 0
+    }
+  ],
+  "paused_grids": [
+    {
+      "instId": "",
+      "direction": "",
+      "maxPx": 0,
+      "minPx": 0,
+      "sl_px": 0,
+      "lever": 10,
+      "sz": 0,
+      "resume_after": ""
     }
   ]
 }
@@ -596,6 +607,9 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
 | 6 | 情绪 (sentiment) | **10 pts** | 看多>50%且热度>200→10 / 看多>40%且热度>100→6 / 中性→3 / 看空→0 |
 | 7 | 资金费率 (funding) | **10 pts** | 正常±0.02%→10 / 极端正>0.05%→3 / 极端负<-0.05%→3 |
 
+> **⚠️ 资金费率硬性拦截**：若 `abs(fundingRate) > 0.01`（即 >1%），**无论评分多高，强制跳过该标的**。
+> 原因：1%/次 = 每天最高3%的资金成本，将快速侵蚀网格利润，不值得部署。
+
 **AI must output for each candidate:**
 ```
 [网格候选加权评分: {instId}]
@@ -665,8 +679,28 @@ Save to state.grid_bots: algoId, instId, direction, maxPx={grid_max}, minPx={gri
 ### Step 3E — Grid Bot Management (existing bots)
 
 ```bash
-NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx bot grid details --algoId {algoId} --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx bot grid details --algoId {algoId} --algoOrdType contract_grid --profile tradebot
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker {instId} --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market funding-rate {instId} --profile tradebot
+```
+
+**⚠️ 资金费率规避（最高优先级，先于止损检查）**：
+```
+now = current_time
+minutes_to_funding = (fundingTime - now) in minutes
+
+if abs(fundingRate) > 0.01 AND minutes_to_funding <= 30:
+    → 立即停止网格以规避本次资金费
+    → 记录到state：paused_grid = {instId, algoId, direction, maxPx, minPx, sl_px, sz, resume_after: fundingTime + 10min}
+    → 从state.grid_bots移除
+    → 执行: okx bot grid stop --algoId {algoId} --algoOrdType contract_grid --profile tradebot
+    → 日志: "FUNDING AVOID: 停止 {instId} 网格，资金费率={fundingRate:.3%}，结算时间={fundingTime}"
+
+if instId in state.paused_grids AND now > resume_after:
+    → 重建网格（使用原参数：direction, maxPx, minPx, sz）
+    → 执行 Step 3D 创建逻辑
+    → 移出 paused_grids，加入 grid_bots
+    → 日志: "FUNDING RESUME: 重启 {instId} 网格"
 ```
 
 **Stop Loss**: Long grid if `price < stop_loss_px`, Short grid if `price > stop_loss_px`:

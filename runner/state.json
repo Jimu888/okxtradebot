@@ -1,5 +1,5 @@
 {
-  "btc_activated": false,
+  "btc_activated": true,
   "btc_position": {
     "active": false,
     "entry_count": 0,
@@ -8,14 +8,36 @@
     "remaining_pct": 100
   },
   "rave_position": {
-    "active": true,
-    "avg_entry_price": 22.062,
-    "total_sz": 2,
+    "active": false,
+    "avg_entry_price": 0.0,
+    "total_sz": 0,
     "remaining_pct": 100,
-    "signal_count": 2,
-    "swing_high": 28.5,
+    "signal_count": 0,
+    "swing_high": 0,
     "vegas_addon_count": 0,
     "bb_addon_count": 0
   },
-  "grid_bots": []
+  "grid_bots": [
+    {
+      "instId": "EDGE-USDT-SWAP",
+      "algoId": "3490065356448776192",
+      "direction": "neutral",
+      "maxPx": 1.385,
+      "minPx": 1.335,
+      "sl_px": 1.20,
+      "lever": 10,
+      "sz": 70
+    },
+    {
+      "instId": "THETA-USDT-SWAP",
+      "algoId": "3490161303400898560",
+      "direction": "neutral",
+      "maxPx": 0.2412,
+      "minPx": 0.2142,
+      "sl_px": 0.1928,
+      "lever": 10,
+      "sz": 40
+    }
+  ],
+  "paused_grids": []
 }
