@@ -2,19 +2,20 @@
 name: okx-compound-strategy
 description: >
   AI-driven compound trading strategy with multi-dimensional market assessment.
-  Each cycle begins with a market context evaluation across volatility, sentiment,
-  and capital flow dimensions before any trade decision is made.
-  BTC-USDT-SWAP: 50x isolated, long-only. Entry confidence scored 0-10 using
-  RSI+CCI+MFI+Supertrend+funding rate+long-short ratio+candlestick patterns.
-  Only HIGH confidence (≥7) triggers full entry; MEDIUM (5-6) triggers half-size.
+  Each cycle begins with Phase 0.5 market context (Supertrend, ADX, BBWidth, HV,
+  MFI, funding rate, long/short ratio, sentiment) before any trade decision.
+  BTC-USDT-SWAP: 50x isolated, long-only. Entry scored 0-100 across 7 weighted
+  dimensions (RSI, CCI, MFI, Supertrend, L/S ratio, funding, candlestick).
+  Score ≥70 → full entry 200U; 50-69 → half entry 100U; <50 → skip.
+  AI must output structured scoring block + reasoning every cycle.
   RAVE-USDT-SWAP: dedicated short with multi-timeframe signal counting (optional).
-  Grid bots: dual-scan using both price gainers and OI accumulation scanner,
-  validated by sentiment, BBWidth volatility filter, and capital flow confirmation.
+  Grid bots: dual-scan (price gainers + OI accumulation), validated by 7-dimension
+  100-point scoring. Score drives position sizing dynamically.
   All orders tagged agentTradeKit for leaderboard counting.
 license: MIT
 metadata:
   author: compound-strategy
-  version: "3.1.0"
+  version: "3.2.0"
   category: compound-strategy
   dependencies: okx-cex-market, okx-cex-trade, okx-cex-bot, okx-cex-portfolio
 ---
@@ -278,6 +279,15 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
 Clear btc_position from state.
 
 **Take Profit ① — CCI > 100** (if `remaining_pct == 100`):
+
+AI must output reasoning before executing:
+```
+[BTC TP① 推理]
+CCI={值} 已超买，短期动量见顶。当前未实现盈亏={uPnL}U。
+评估：{本次减仓20%的理由；若Supertrend仍UP可保留更多，若ADX走弱则应更激进减仓}
+决策: 执行TP① 减仓20%
+```
+
 ```
 close_sz = floor(state.btc_position.total_sz * 0.20)
 ```
@@ -289,6 +299,15 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
 Update `remaining_pct = 80`.
 
 **Take Profit ② — RSI > 70** (close ALL remaining):
+
+AI must output reasoning before executing:
+```
+[BTC TP② 推理]
+RSI={值} 进入超买区间，上涨动能趋于枯竭。持仓均价={avg}，当前价={price}，盈利={profit_pct:.1f}%。
+评估：{资金费率、多空比是否支持继续持有；若出现背离信号说明；综合判断当前是否为合理出场点}
+决策: 执行TP② 平全部剩余仓位
+```
+
 ```
 remaining_sz = floor(state.btc_position.total_sz * remaining_pct / 100)
 ```
@@ -619,6 +638,10 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
 ```
 grid_min = current_price - (1.5 * atr)
 grid_max = current_price + (1.5 * atr)
+
+# Stop loss: outside grid range with 10% buffer
+stop_loss_px = grid_min * 0.90   (for long/neutral grid)
+stop_loss_px = grid_max * 1.10   (for short grid)
 ```
 
 ```bash
@@ -637,7 +660,7 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
   --profile tradebot
 ```
 
-Save to state.grid_bots with algoId, instId, direction, entry_oi, initial_sz, current_sz, stop_loss_px.
+Save to state.grid_bots: algoId, instId, direction, maxPx={grid_max}, minPx={grid_min}, sl_px={stop_loss_px}, lever=10, sz={position_size}.
 
 ### Step 3E — Grid Bot Management (existing bots)
 
@@ -676,11 +699,11 @@ Baseline: ... Overall confidence adjustment: ...
 **2. Per-strategy Decision Block:**
 ```
 [BTC DECISION]
-Score: {n}/10 | Decision: ENTER/SKIP
+Score: {n}/100 | Decision: ENTER FULL / ENTER HALF / SKIP
 Reasoning: {Why. What the setup looks like. What could go wrong.}
 
 [GRID DECISION: {instId}]
-Score: {n}/10 | Decision: DEPLOY/SKIP
+Score: {n}/100 | Decision: DEPLOY / REDUCED / PROBE / SKIP
 Reasoning: {Why this token. What makes it different from others. What the risk is.}
 ```
 
@@ -720,9 +743,9 @@ Every 5 minutes:
 │
 ├─ 4. PHASE 2: BTC Strategy
 │   ├─ Not activated? → check 1H DIF → activate if near zero
-│   ├─ No position? → multi-dimensional scoring (RSI+CCI+MFI+pattern+context)
-│   │   ├─ Score ≥7 → full entry (200U) | Score 5-6 → half entry (100U) | <5 → skip
-│   │   └─ OUTPUT: score breakdown + reasoning
+│   ├─ No position? → 7-dimension 100-pt weighted scoring (RSI+CCI+MFI+Supertrend+L/S+funding+candle)
+│   │   ├─ Score ≥70 → full entry (200U) | 50-69 → half entry (100U) | <50 → skip
+│   │   └─ OUTPUT: per-dimension score breakdown + AI reasoning block
 │   └─ Has position? → check SL → check CCI TP1 → check RSI TP2
 │
 ├─ 5. PHASE 2.5: RAVE Dedicated Short (optional, signal-gated)
@@ -733,8 +756,8 @@ Every 5 minutes:
 ├─ 6. PHASE 3: Grid Strategy ← ENHANCED
 │   ├─ Dual scan: top-gainers (price) + oi-change (capital flow)
 │   ├─ Merge: tokens in BOTH lists = highest conviction
-│   ├─ Per-candidate: RSI divergence + MACD + BBWidth + MFI + sentiment scoring
-│   ├─ Score-based sizing: ≥8→100U, 6-7→40U, 5→20U
+│   ├─ Per-candidate: 7-dimension 100-pt scoring (source+divergence+MACD+MFI+BBWidth+sentiment+funding)
+│   ├─ Score-based sizing: ≥70→70U, 50-69→40U, 30-49→20U
 │   ├─ OUTPUT: score breakdown + reasoning for each candidate
 │   └─ Manage existing bots (SL / TP)
 │
