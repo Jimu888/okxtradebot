@@ -200,16 +200,16 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
 
 **Only if no active BTC position** (`state.btc_position.active == false`):
 
-**Gate condition** (must pass before scoring): `rsi_5m < 35` AND `cci_5m < -80`
+**Gate condition** (must pass before scoring): `rsi_5m < 45` AND `cci_5m < -60`
 Gate fails → output skip reason and stop. Gate passes → proceed to full scoring.
 
 **Weighted scoring table:**
 
 | # | Dimension | Weight | Scoring Rules |
 |---|-----------|--------|---------------|
-| 1 | RSI 5m (momentum depth) | **20 pts** | <20→20 / <25→16 / <30→12 / <35→6 / ≥35→0 |
-| 2 | CCI 5m (oscillator depth) | **15 pts** | <-200→15 / <-150→12 / <-100→8 / <-80→4 / ≥-80→0 |
-| 3 | MFI 5m (capital outflow) | **20 pts** | <20→20 / <30→15 / <40→8 / ≥40→0 |
+| 1 | RSI 5m (momentum depth) | **20 pts** | <30→20 / <35→16 / <40→12 / <45→6 / ≥45→0 |
+| 2 | CCI 5m (oscillator depth) | **15 pts** | <-150→15 / <-100→12 / <-80→8 / <-60→4 / ≥-60→0 |
+| 3 | MFI 5m (capital outflow) | **20 pts** | <30→20 / <40→15 / <50→8 / ≥50→0 |
 | 4 | Supertrend 1H (trend) | **15 pts** | UP→15 / DOWN→0 |
 | 5 | Long/Short ratio (positioning) | **10 pts** | short>65%→10 / short>55%→6 / balanced→3 / long>55%→0 |
 | 6 | Funding rate (market bias) | **10 pts** | <-0.02%→10 / <-0.01%→7 / ±0.01%→4 / >0.02%→0 |
