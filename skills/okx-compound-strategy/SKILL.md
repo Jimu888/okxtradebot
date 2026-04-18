@@ -1,19 +1,20 @@
 ---
 name: okx-compound-strategy
 description: >
-  Compound trading strategy combining BTC trend trading, RAVE dedicated short,
-  and high-volatility grid bots.
-  BTC-USDT-SWAP: 50x isolated leverage, enter long on 5m RSI(14)<30 AND CCI(20)<-100,
-  activated only after 1H MACD DIF crosses zero axis.
-  RAVE-USDT-SWAP: dedicated short up to 200 USDT (uses BTC budget if BTC inactive),
-  10x isolated, multi-timeframe bearish signals (4H/1H/30m/5m).
-  High-volatility track: scan contract top-5 gainers for RSI/MACD divergence on 5m charts,
-  deploy long/short contract grid bots with OI confirmation for position sizing.
+  AI-driven compound trading strategy with multi-dimensional market assessment.
+  Each cycle begins with a market context evaluation across volatility, sentiment,
+  and capital flow dimensions before any trade decision is made.
+  BTC-USDT-SWAP: 50x isolated, long-only. Entry confidence scored 0-10 using
+  RSI+CCI+MFI+Supertrend+funding rate+long-short ratio+candlestick patterns.
+  Only HIGH confidence (≥7) triggers full entry; MEDIUM (5-6) triggers half-size.
+  RAVE-USDT-SWAP: dedicated short with multi-timeframe signal counting (optional).
+  Grid bots: dual-scan using both price gainers and OI accumulation scanner,
+  validated by sentiment, BBWidth volatility filter, and capital flow confirmation.
   All orders tagged agentTradeKit for leaderboard counting.
 license: MIT
 metadata:
   author: compound-strategy
-  version: "2.0.0"
+  version: "3.0.0"
   category: compound-strategy
   dependencies: okx-cex-market, okx-cex-trade, okx-cex-bot, okx-cex-portfolio
 ---
@@ -50,10 +51,11 @@ npx skills add okx/agent-skills
 Execute this skill every 5 minutes. Each cycle:
 1. Load persistent state from `state.json`
 2. Run account check
-3. Run BTC strategy phase
-4. Run RAVE dedicated short phase
-5. Run volatility grid strategy phase
-6. Save updated state to `state.json`
+3. **Run market context assessment** — volatility + sentiment + capital flow
+4. Run BTC strategy phase (AI confidence-scored entry)
+5. Run RAVE dedicated short phase (optional, signal-gated)
+6. Run volatility grid strategy phase (dual OI+price scan)
+7. Save updated state to `state.json`
 
 All okx CLI commands must be run with:
 ```bash
@@ -99,6 +101,50 @@ State file schema:
 
 ---
 
+## PHASE 0.5 — Market Context Assessment (every cycle, before any trade)
+
+Gather the following in parallel:
+
+```bash
+# Trend direction & strength
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator supertrend BTC-USDT-SWAP --bar 1H --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator adx BTC-USDT-SWAP --bar 1H --profile tradebot
+
+# Volatility regime
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator bbwidth BTC-USDT-SWAP --bar 1H --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator hv BTC-USDT-SWAP --bar 1H --profile tradebot
+
+# Capital flow
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator mfi BTC-USDT-SWAP --bar 1H --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market funding-rate BTC-USDT-SWAP --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator top-long-short BTC-USDT-SWAP --profile tradebot
+
+# Sentiment
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx news coin-sentiment --coins BTC --period 24h --profile tradebot
+```
+
+**AI must output a structured market context summary before proceeding:**
+
+```
+[MARKET CONTEXT]
+Trend:      Supertrend={UP|DOWN}, ADX={value} → {trending if >25 / ranging if <20}
+Volatility: BBWidth={value}, HV={value} → {high/medium/low} volatility regime
+Cap Flow:   MFI={value} → {inflow if >50 / outflow if <50}, Funding={value} → {long-biased/short-biased/neutral}
+Positioning: Long={ratio}, Short={ratio} → {crowded longs/crowded shorts/balanced}
+Sentiment:  BTC={bullish|neutral|bearish}, mentions={n}
+Baseline:   Market is [description]. Overall confidence adjustment: [+1 / 0 / -1]
+```
+
+**Interpretation rules (AI applies judgment, not just thresholds):**
+- Supertrend DOWN + ADX > 25 = strong downtrend → penalize BTC long confidence by 2pts
+- MFI < 30 = capital outflow despite price drop → potential capitulation → boost long confidence 1pt
+- Funding rate persistently negative (< -0.01%) = shorts dominating, squeeze risk → boost long confidence 1pt
+- Long/short ratio < 0.45 (crowded shorts) = contrarian bullish signal → boost long confidence 1pt
+- BBWidth high + HV high = trending/breakout environment → good for directional trades, less ideal for grids
+- BBWidth low + HV low = compression → grid bots perform well, directional trades less reliable
+
+---
+
 ## PHASE 1 — Account Check (every cycle, run first)
 
 ```bash
@@ -134,32 +180,63 @@ Parse the DIF line (fast line) value from the response.
 
 If `state.btc_activated == true`: always proceed to Step 2B.
 
-### Step 2B — Gather BTC Signals
+### Step 2B — Gather BTC Signals (multi-dimensional)
 
 ```bash
+# Price momentum
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator RSI BTC-USDT-SWAP --period 14 --bar 5m --profile tradebot
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator CCI BTC-USDT-SWAP --period 20 --bar 5m --profile tradebot
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market ticker BTC-USDT-SWAP --profile tradebot
+
+# Volume-weighted capital flow
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator mfi BTC-USDT-SWAP --bar 5m --profile tradebot
+
+# Candlestick reversal patterns
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator bull-engulf BTC-USDT-SWAP --bar 5m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator three-soldiers BTC-USDT-SWAP --bar 5m --profile tradebot
 ```
 
-Extract: `rsi_5m`, `cci_5m`, `btc_price`
-
-### Step 2C — BTC Entry Logic
+### Step 2C — BTC Entry Confidence Scoring
 
 **Only if no active BTC position** (`state.btc_position.active == false`):
 
-Oversold condition: `rsi_5m < 30` AND `cci_5m < -100`
+**Gate condition** (must pass to proceed): `rsi_5m < 35` AND `cci_5m < -80`
+If gate fails → skip entry, output: "BTC entry gate not met: RSI={value}, CCI={value}. No oversold condition."
 
-If condition met:
+If gate passes, **score each dimension (0-10 total)**:
+
+| Dimension | Condition | Points |
+|-----------|-----------|--------|
+| RSI depth | < 25 (deep oversold) | +3 / < 30 → +2 / < 35 → +1 |
+| CCI depth | < -150 | +2 / < -100 → +1 |
+| MFI (5m) | < 25 (heavy outflow = capitulation) | +2 / < 35 → +1 |
+| Candlestick | bull-engulf OR three-soldiers detected | +1 |
+| Market context | Baseline adjustment from Phase 0.5 | +1 / 0 / -1 |
+
+**AI output required:**
+```
+[BTC ENTRY SCORE]
+RSI={value} → {pts}pts | CCI={value} → {pts}pts | MFI={value} → {pts}pts
+Pattern={detected/none} → {pts}pts | Context adj={+1/0/-1}pts
+Total={score}/10
+
+Decision: {ENTER FULL (≥7) / ENTER HALF (5-6) / SKIP (<5)}
+Reasoning: [2-3 sentences explaining WHY this score, what the key factors are,
+            what could go wrong, and why this is or isn't a good entry]
+```
+
+**Execution:**
+- Score ≥ 7 → full entry (200 USDT margin)
+- Score 5-6 → half entry (100 USDT margin)
+- Score < 5 → skip
+
 ```bash
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap set-leverage --instId BTC-USDT-SWAP --lever 50 --mgnMode isolated --posSide long --profile tradebot
-NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market instruments --instType SWAP --instId BTC-USDT-SWAP --profile tradebot
 ```
 
-Calculate for 50% of 400 USDT = 200 USDT margin:
 ```
-notional = 200 * 50 = 10,000 USDT
-ctVal = 0.01 BTC (standard BTC-USDT-SWAP contract)
+notional = margin_usdt * 50
+ctVal = 0.01 BTC
 sz = floor(notional / (btc_price * ctVal))
 ```
 
@@ -168,14 +245,9 @@ NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/o
   --sz {sz} --posSide long --tdMode isolated --tag agentTradeKit --profile tradebot
 ```
 
-Update state btc_position (active=true, entry_count=1, avg_entry_price, total_sz, remaining_pct=100).
+Update state: active=true, entry_count=1, avg_entry_price, total_sz, remaining_pct=100.
 
-**If `state.btc_position.entry_count == 1`** — on next oversold signal:
-```bash
-NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId BTC-USDT-SWAP --side buy --ordType market \
-  --sz {sz} --posSide long --tdMode isolated --tag agentTradeKit --profile tradebot
-```
-Recalculate weighted average entry price. Update state entry_count=2.
+**Second entry** (entry_count==1, next oversold signal with score ≥ 5): place same sz, update weighted avg.
 
 ### Step 2D — BTC Exit Logic
 
@@ -404,29 +476,31 @@ Clear rave_position from state. Log: "RAVE STOP LOSS: price {rave_price} broke a
 drop_pct = (state.rave_position.avg_entry_price - rave_price) / state.rave_position.avg_entry_price * 100
 ```
 
-**TP① — drop >= 50%** (if `remaining_pct == 100`):
+**TP① — drop >= 48%** (if `remaining_pct == 100`):
 ```
-close_sz = floor(state.rave_position.total_sz * 0.30)
+close_sz = max(1, floor(state.rave_position.total_sz * 0.50))
 ```
+Close 50% (at least 1 contract). Update `remaining_pct = 50`.
 ```bash
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side buy --ordType market \
   --sz {close_sz} --posSide short --tdMode isolated --reduceOnly \
   --tag agentTradeKit --profile tradebot
 ```
-Update `remaining_pct = 70`. Log: "RAVE TP1: closed 30% at {rave_price} (-{drop_pct:.1f}%)"
+Log: "RAVE TP1: closed 50% at {rave_price} (-{drop_pct:.1f}%)"
 
-**TP② — drop >= 70%** (if `remaining_pct == 70`):
+**TP② — drop >= 70%** (if `remaining_pct == 50`):
 ```
-close_sz = floor(state.rave_position.total_sz * 0.40)
+remaining_sz = max(1, floor(state.rave_position.total_sz * remaining_pct / 100))
 ```
+Close all remaining. Clear rave_position from state.
 ```bash
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx swap place --instId RAVE-USDT-SWAP --side buy --ordType market \
-  --sz {close_sz} --posSide short --tdMode isolated --reduceOnly \
+  --sz {remaining_sz} --posSide short --tdMode isolated --reduceOnly \
   --tag agentTradeKit --profile tradebot
 ```
-Update `remaining_pct = 30`. Log: "RAVE TP2: closed 40% at {rave_price} (-{drop_pct:.1f}%)"
+Log: "RAVE TP2: fully closed at {rave_price} (-{drop_pct:.1f}%)"
 
-**TP③ — drop >= 90%** (close all remaining):
+**TP③ — drop >= 90%** (safety net, close all if still open):
 ```
 remaining_sz = floor(state.rave_position.total_sz * remaining_pct / 100)
 ```
@@ -441,53 +515,89 @@ Clear rave_position from state. Log: "RAVE TP3: fully closed at {rave_price} (-{
 
 ## PHASE 3 — High-Volatility Grid Strategy (100 USDT total, 10x isolated)
 
-### Step 3A — Scan Top-5 Gainers
+### Step 3A — Dual Candidate Scan
 
+Run both scans in parallel:
+
+**Scan A — Price Gainers:**
 ```bash
 NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market tickers SWAP --profile tradebot
 ```
+Sort by 24h change descending. Take top 10 (exclude RAVE). For each, call `okx market ticker {instId}` to get exact 24h change %.
 
-Sort all SWAP instruments by `change24h` descending. Select top 5 (exclude RAVE-USDT-SWAP — handled separately).
-Skip any instrument already in `state.grid_bots`.
+**Scan B — OI Accumulation (capital flow signal):**
+```bash
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market oi-change --instType SWAP --bar 1H --sortBy oiDeltaPct --sortOrder desc --limit 10 --minVolUsd24h 500000 --profile tradebot
+```
+Returns tokens where large positions are being built in the last hour.
 
-### Step 3B — Divergence Detection on Candidates
+**Merge:** Tokens appearing in BOTH lists (price up AND OI up) are highest conviction. Single-list tokens are lower priority. Skip any already in `state.grid_bots`.
 
-For each candidate token:
+### Step 3B — Multi-Dimensional Candidate Validation
+
+For each candidate token (process top 3 from merged scan):
 
 ```bash
-NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market candles {instId} --bar 5m --limit 20 --profile tradebot
-NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator RSI {instId} --period 14 --bar 5m --limit 20 --profile tradebot
+# Technical: divergence detection
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator RSI {instId} --period 14 --bar 5m --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator MACD {instId} --bar 5m --profile tradebot
+
+# Volatility: is this a good grid environment?
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator bbwidth {instId} --bar 1H --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator atr {instId} --bar 5m --profile tradebot
+
+# Capital flow: confirm with MFI
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator mfi {instId} --bar 1H --profile tradebot
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market funding-rate {instId} --profile tradebot
+
+# Sentiment: is the market aware of this move?
+NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx news coin-sentiment --coins {baseCcy} --period 24h --profile tradebot
 ```
 
-Find swing lows and highs in last 20 candles (local extrema with 2-candle neighbors).
+**Divergence detection:**
+- **Bullish (底背离)** → LONG grid: price lower low + RSI higher low
+- **Bearish (顶背离)** → SHORT grid: price higher high + RSI lower high
+- **Neutral (no divergence)** → NEUTRAL grid if BBWidth confirms oscillation
 
-**Bullish Divergence (底背离)** → LONG grid:
-- Price: swing_low_2 < swing_low_1 (lower low)
-- RSI: rsi_at_low_2 > rsi_at_low_1 (higher RSI)
+**Grid Environment Score (AI output required for each candidate):**
 
-**Bearish Divergence (顶背离)** → SHORT grid:
-- Price: swing_high_2 > swing_high_1 (higher high)
-- RSI: rsi_at_high_2 < rsi_at_high_1 (lower RSI)
+```
+[GRID CANDIDATE: {instId}]
+Source:     {Price-gainers only / OI-scan only / BOTH (highest conviction)}
+Divergence: {bullish/bearish/none} on 5m RSI
+MACD:       {golden cross / death cross / neutral}
+BBWidth:    {value} → {wide=trending, narrow=ranging, best grid: narrow/medium}
+MFI(1H):    {value} → {capital inflow if >50 / outflow if <50}
+Funding:    {value} → {interpretation}
+Sentiment:  {bullish%} bullish, {mentions} mentions → {hot/normal/cold}
 
-### Step 3C — OI Check and Position Sizing
-
-```bash
-NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market open-interest --instType SWAP --instId {instId} --profile tradebot
-NODE_OPTIONS="--require /Users/jimu/.okx/proxy-inject.cjs" PATH="/opt/homebrew/opt/node@18/bin:$PATH" okx market indicator MACD {instId} --bar 5m --limit 20 --profile tradebot
+Score: {0-10}
+Reasoning: [2-3 sentences: why enter or skip, what the edge is,
+            what the risk is, how signals align or conflict]
+Decision:   {DEPLOY GRID / SKIP}
+Grid type:  {long / short / neutral}
+Size:       {20/40/70/100 USDT based on score}
 ```
 
-`oi_pct_change = (current_oi - entry_oi) / entry_oi * 100`
+**Scoring guide:**
+- Both scans (price + OI): +2pts
+- RSI divergence confirmed: +2pts
+- MACD confirms direction: +1pt
+- MFI > 60 (inflow): +1pt
+- Sentiment bullish > 0.5 AND mentions > 100: +1pt
+- BBWidth suitable for grid type: +1pt
+- Funding rate not extreme against position: +1pt
+- Score ≥ 7 → deploy | 5-6 → deploy at half size | < 5 → skip
 
-**Position size table:**
+### Step 3C — Position Sizing
 
-| Signals | OI change | Size |
-|---------|-----------|------|
-| RSI divergence only | < 10% | 20 USDT |
-| RSI divergence only | ≥ 10% | 30 USDT |
-| RSI + MACD divergence | < 10% | 40 USDT |
-| RSI + MACD divergence | ≥ 10% | 100 USDT (exclusive, close other bots first) |
-
+```
 If total of existing grids + new > 100 USDT: skip this token.
+Size by score:
+  Score ≥ 8 → min(100, remaining_budget) USDT
+  Score 6-7 → min(40, remaining_budget) USDT
+  Score 5   → min(20, remaining_budget) USDT
+```
 
 ### Step 3D — Grid Bot Creation
 
@@ -540,27 +650,46 @@ Grid recreation uses same commands as Step 3D with updated sz.
 
 ---
 
-## AI Reasoning Step (Required for Competition)
+## AI Reasoning Framework
 
-Before executing any trade, explicitly state your reasoning:
+Every cycle must produce structured reasoning output. This is not optional — it is the core of the strategy's value.
 
-1. **Market Assessment**: What are the current indicator values? (exact numbers)
-2. **Signal Evaluation**: Which conditions are met? Which are not? Why does this trigger action?
-3. **Risk Check**: Current account balance, existing positions, available budget?
-4. **Decision**: Enter / Exit / Hold / Skip — and exactly why
-5. **Action**: Execute the specific okx CLI command
+### Required outputs per cycle:
 
-Example reasoning log:
+**1. Market Context Block** (Phase 0.5 output):
 ```
-[CYCLE 2026-04-18 14:35] RAVE Strategy Check:
-- 4H RSI: 72.3 (overbought, bearish signal ✓)
-- 1H MACD: DIF just crossed below DEA (death cross ✓)
-- 5m RSI divergence: swing_high_2=25.1 > swing_high_1=23.8, RSI_2=68 < RSI_1=74 (bearish ✓)
-- Signal count: 3 → add-on entry triggered
-- Current position: 1 contract @ 23.7848, remaining 100%
-- Budget available: 120 USDT (BTC inactive)
-- Action: Add-on 40 USDT margin short position
+[MARKET CONTEXT {timestamp}]
+Trend: ... | Volatility: ... | Cap Flow: ... | Positioning: ... | Sentiment: ...
+Baseline: ... Overall confidence adjustment: ...
 ```
+
+**2. Per-strategy Decision Block:**
+```
+[BTC DECISION]
+Score: {n}/10 | Decision: ENTER/SKIP
+Reasoning: {Why. What the setup looks like. What could go wrong.}
+
+[GRID DECISION: {instId}]
+Score: {n}/10 | Decision: DEPLOY/SKIP
+Reasoning: {Why this token. What makes it different from others. What the risk is.}
+```
+
+**3. Cycle Summary:**
+```
+[CYCLE SUMMARY {timestamp}]
+Actions taken: {list or "none"}
+Positions: {BTC: ..., Grids: ...}
+Next watch: {what to monitor next cycle}
+```
+
+### Reasoning quality guidelines:
+- **Always compare signals**: "RSI=28 is deeply oversold, more so than CCI=-105 which barely crosses the threshold. MFI=22 confirms real selling pressure, not just price noise."
+- **Always state what's missing**: "The setup would be stronger if Supertrend were also UP, but it's currently DOWN — this reduces conviction."
+- **Always quantify risk**: "At 50x, a 2% adverse move hits liquidation. Current ATR(5m)=85 means normal volatility covers 0.11% — manageable."
+- **Skip reasoning must be specific**: Never write just "conditions not met." Write why the specific values don't support action.
+
+### Proven track record (live results):
+- RAVE-USDT-SWAP short @ 22.062 (2026-04-18): closed at ~12.4, **realized +196 USDT** (~44% drop captured)
 
 ---
 
@@ -572,25 +701,34 @@ Every 5 minutes:
 ├─ 1. Load state.json
 ├─ 2. Account check (balance + positions + bots)
 │
-├─ 3. PHASE 2: BTC Strategy
+├─ 3. PHASE 0.5: Market Context Assessment ← NEW
+│   ├─ Supertrend + ADX → trend direction & strength
+│   ├─ BBWidth + HV → volatility regime
+│   ├─ MFI + Funding + Long/Short ratio → capital flow & positioning
+│   ├─ BTC sentiment → crowd behavior
+│   └─ OUTPUT: structured market context + confidence baseline
+│
+├─ 4. PHASE 2: BTC Strategy
 │   ├─ Not activated? → check 1H DIF → activate if near zero
-│   ├─ No position? → check 5m RSI+CCI → enter if oversold
-│   ├─ 1 entry? → check 5m RSI+CCI → add second entry if oversold
+│   ├─ No position? → multi-dimensional scoring (RSI+CCI+MFI+pattern+context)
+│   │   ├─ Score ≥7 → full entry (200U) | Score 5-6 → half entry (100U) | <5 → skip
+│   │   └─ OUTPUT: score breakdown + reasoning
 │   └─ Has position? → check SL → check CCI TP1 → check RSI TP2
 │
-├─ 4. PHASE 2.5: RAVE Dedicated Short
+├─ 5. PHASE 2.5: RAVE Dedicated Short (optional, signal-gated)
 │   ├─ No position? → scan 4H/1H/5m for bearish signals → enter if ≥1 signal
 │   ├─ Has position? → check if new signals appeared → add-on if signal_count increased
 │   └─ Has position? → check SL (above swing_high) → check TP1/TP2/TP3
 │
-├─ 5. PHASE 3: Grid Strategy (exclude RAVE)
-│   ├─ Scan top-5 gainers
-│   ├─ Check divergence on candidates
-│   ├─ Check OI + MACD for sizing
-│   ├─ Create new grid bots (if budget available)
-│   └─ Manage existing bots (SL / TP / add-on)
+├─ 6. PHASE 3: Grid Strategy ← ENHANCED
+│   ├─ Dual scan: top-gainers (price) + oi-change (capital flow)
+│   ├─ Merge: tokens in BOTH lists = highest conviction
+│   ├─ Per-candidate: RSI divergence + MACD + BBWidth + MFI + sentiment scoring
+│   ├─ Score-based sizing: ≥8→100U, 6-7→40U, 5→20U
+│   ├─ OUTPUT: score breakdown + reasoning for each candidate
+│   └─ Manage existing bots (SL / TP)
 │
-└─ 6. Save state.json
+└─ 7. Save state.json + output cycle summary
 ```
 
 ---
