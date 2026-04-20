@@ -1,21 +1,50 @@
 {
+  "peak_equity": 728.0,
   "btc_activated": true,
+  "gemma4_analysis": {
+    "trend_daily": "SIDEWAYS",
+    "trend_12h": "DOWN",
+    "trend_6h": "DOWN",
+    "trend_4h": "SIDEWAYS",
+    "trend_1h": "DOWN",
+    "support_1": 75000,
+    "support_2": 73800,
+    "resistance_1": 76800,
+    "resistance_2": 78000,
+    "direction": "SHORT",
+    "confidence": "HIGH",
+    "updated_at": "2026-04-19 02:27",
+    "notes": "12H暴涨后3根阴线回撤(非崩盘) + 4H MACD零轴上死叉 + 6H 5根连阴 = 空头偏向"
+  },
   "btc_position": {
     "active": false,
+    "direction": "none",
     "entry_count": 0,
-    "avg_entry_price": 0.0,
+    "avg_entry_price": 0,
     "total_sz": 0,
-    "remaining_pct": 100
+    "remaining_pct": 100,
+    "oco_algoId": null,
+    "oco_sl_px": 0,
+    "oco_tp_px": 0
   },
   "rave_position": {
     "active": false,
-    "avg_entry_price": 0.0,
+    "direction": "none",
+    "avg_entry_price": 0,
     "total_sz": 0,
     "remaining_pct": 100,
     "signal_count": 0,
     "swing_high": 0,
     "vegas_addon_count": 0,
-    "bb_addon_count": 0
+    "bb_addon_count": 0,
+    "last_trade": {
+      "entry_price": 3.759,
+      "exit_price": 3.209,
+      "sz": 1.5,
+      "realized_pnl": 8.25,
+      "closed_at": "2026-04-19 02:49",
+      "exit_reason": "OCO TP triggered"
+    }
   },
   "grid_bots": [
     {
@@ -37,7 +66,25 @@
       "sl_px": 0.1928,
       "lever": 10,
       "sz": 40
+    },
+    {
+      "instId": "APE-USDT-SWAP",
+      "algoId": "3490866047169748992",
+      "direction": "neutral",
+      "maxPx": 0.1090,
+      "minPx": 0.1020,
+      "sl_px": 0.0920,
+      "lever": 10,
+      "sz": 50,
+      "basePos": false,
+      "actual_margin": "~49 USDT",
+      "note": "sz=500 was oversized consuming 500U; stopped and redeployed at sz=50"
     }
   ],
-  "paused_grids": []
+  "paused_grids": [],
+  "pending_short_setup": {
+    "instrument": "BTC-USDT-SWAP",
+    "trigger": "价格反弹至76500-76800(R1)出现看跌信号 或 跌破75000(support_1)加速下行",
+    "rationale": "4H MACD零轴上方死叉 + 12H 6根连阴 + 1H DOWN = 空头主场"
+  }
 }

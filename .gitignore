@@ -1,0 +1,10 @@
+.env
+.okx/
+~/.okx/
+*.key
+*.pem
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
