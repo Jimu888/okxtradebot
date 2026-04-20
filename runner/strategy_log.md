@@ -2218,3 +2218,40 @@ example: BTC SL 0.4% × 50x → margin = $132/0.20 = $660 ≈ ~44张
 - Next fresh setup按新框架: 大sz (~10-30张) + 紧structural SL
 
 **Active**: BTC 1张 + RAVE wick traps ×3
+
+## 2026-04-20 14:00 - ★HANDOFF: 本机停止, 另一台电脑接手★
+
+**移交时账户状态**:
+- Equity: 658.91U
+- Available: 536.83U
+- Frozen: 122.08U
+
+**Active 仓位**:
+- BTC short 1张 @ 74500 (avgPx), current 74267, upl +$2.32
+- 50x isolated leverage ✓
+
+**Active OCO**:
+- algoId 3494790261883301888 → BTC TP 73800 / SL 74800 (live)
+
+**Active 限价**:
+- RAVE wick traps ×3: short 10@1.38, short 15@1.50, short 10@1.60 (live, RAVE现0.7附近, 远未触及)
+
+**Session累计 (移交时)**:
+- Realized: +$5.83 (CL +$13.79, PIPPIN +$9.04, BTC ladder -$8.86, 加上前期 -$17)
+- Floating: +$2.32
+- 起点 691.88 → 现 658.91 = -$32.97 (-4.8%)
+
+**新风控规则 (2026-04-20 13:25 用户更新)**:
+- 单次最大亏损 ≤ 20% equity
+- 取消 50U 单仓上限, 取消 200U free 保留
+- Equity floor: 300U
+- 仓位由AI根据setup动态判定, 可20-50张
+
+**接手机器注意事项 (重要!)**:
+1. ★千万别同时双跑★ 两个Claude看到同账户会double-submit
+2. 接手前先 `okx swap algo orders` 确认OCO仍live
+3. BTC短单不要平不要加, 让OCO自然触发TP 73800 (~+$7) 或SL 74800 (~-$3)
+4. RAVE wick traps可保留, 不锁margin
+5. Memory已同步在 GitHub repo memory/ 子目录
+
+**此时本机 loop 停止, 不再 ScheduleWakeup**
